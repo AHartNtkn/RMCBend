@@ -250,7 +250,7 @@ type RMCProg:
   # Repeate relation infinitely
   Rep {~fst}
   # Chose between several relations
-  Or {args}
+  Or {fst, snd}
   # Bind fresh unification variable (analagous to `fresh` in kanren)
   # fst should be lambda expression. This is HOAS (is there a way to get this to work with `fold`, etc?)
   Ex {fst}
@@ -270,9 +270,14 @@ def RMCProgString(prog):
     case RMCProg/Rep:
       return String/Cons('*', RMCProgString(prog.fst))
     case RMCProg/Or:
-      return String/concat(String/Cons('(', RMCProgArgsString(prog.args, " + ")), ")")
+      return String/Cons(  '(',
+             String/concat(RMCProgString(prog.fst),
+             String/concat(" + ",
+             String/concat(RMCProgString(prog.snd),
+                           ")"
+             ))))
     case RMCProg/Ex:
-      return String/concat("fresh x.", RMCProgString(prog.fst(Term/Var(`x`, `W`))))
+      return String/concat("fresh x.", RMCProgString(prog.fst(Term/Var(`x`, Term/Const(`WW`)))))
     case RMCProg/Push:
       return String/concat("Push(", 
              String/concat(TermString(prog.val), 
@@ -310,7 +315,7 @@ def duel(prog):
     case RMCProg/Rep:
       return RMCProg/Rep(duel(prog.fst))
     case RMCProg/Or:
-      return RMCProg/Or(List/map(duel, prog.args))
+      return RMCProg/Or(duel(prog.fst), duel(prog.snd))
     case RMCProg/Ex:
       return RMCProg/Ex(lambda x: duel(prog.fst(x)))
     case RMCProg/Push:
@@ -372,6 +377,24 @@ type Trace:
   Success {env}
   Branch {args}
 
+# Extract the first component of a choice
+def orfst(prog):
+  match prog:
+    case RMCProg/Or:
+      return prog.fst
+    case _:
+      # TODO: Is this bad for affinity (affiness?)
+      return prog
+
+# Extract the second component of a choice
+def orsnd(prog):
+  match prog:
+    case RMCProg/Or:
+      return prog.snd
+    case _:
+      # TODO: Is this bad for affinity (affiness?)
+      return prog
+
 # Take a single step of the RMC.
 # Takes an Env as input and returns a single Trace layer
 def step(env):
@@ -418,31 +441,44 @@ def step(env):
         case RMCProg/Rep:
           # Rep nondeterministically either does nothing or repeats its instruction.
           # TODO: Is there a better way to do this duplication?
-          {stuff1, stuff2} = (env.wireMap, env.stackMap, env.instr.fst, env.instrStack)
-          (wireMap1, stackMap1, instr1, instrStack1) = stuff1
-          (wireMap2, stackMap2, instr2, instrStack2) = stuff2
-          return Trace/Branch([
-                    Env/Env(env.sym
-                           ,wireMap1
-                           ,stackMap1
-                           ,RMCProg/Skip
-                           ,instrStack1),
-                    Env/Env(env.sym
-                           ,wireMap2
-                           ,stackMap2
-                           ,RMCProg/Comp([instr2,RMCProg/Rep(instr2)])
-                           ,instrStack2)
-                 ])
+          ee = Env/Env(env.sym,env.wireMap,env.stackMap,env.instr.fst,env.instrStack)
+          (env1, env2) = (ee, ee)
+          match env1:
+            case Env/Env:
+              match env2:
+                case Env/Env:
+                  return Trace/Branch([
+                            Env/Env(env1.sym
+                                   ,env1.wireMap
+                                   ,env1.stackMap
+                                   ,RMCProg/Skip
+                                   ,env1.instrStack),
+                            Env/Env(env2.sym
+                                   ,env2.wireMap
+                                   ,env2.stackMap
+                                   ,RMCProg/Comp([env2.instr,RMCProg/Rep(env2.instr)])
+                                   ,env2.instrStack)
+                         ])
         case RMCProg/Or:
           # Or makes a nondeterministic choice between its instructions.
-          return Trace/Branch(
-                    List/map(lambda x:
-                      Env/Env(env.sym
-                             ,env.wireMap
-                             ,env.stackMap
-                             ,x
-                             ,env.instrStack),
-                      env.instr.args))
+          ee = Env/Env(env.sym,env.wireMap,env.stackMap,RMCProg/Or(env.instr.fst,env.instr.snd),env.instrStack)
+          (env1, env2) = (ee, ee)
+          match env1:
+            case Env/Env:
+              match env2:
+                case Env/Env:
+                  return Trace/Branch([
+                            Env/Env(env1.sym
+                                   ,env1.wireMap
+                                   ,env1.stackMap
+                                   ,orfst(env1.instr)
+                                   ,env1.instrStack),
+                            Env/Env(env2.sym
+                                   ,env2.wireMap
+                                   ,env2.stackMap
+                                   ,orsnd(env2.instr)
+                                   ,env2.instrStack)
+                         ])
         case RMCProg/Ex:
           # When making a fresh variable, we make its name the current gensym. We then tie
           # that symbol to all other instances via the address space.
@@ -511,8 +547,6 @@ def step(env):
                                        ,env.instrStack)
                               ])
                         case Term/Const:
-                          ### Working on this case
-                          #return Trace/Branch([])
                           return wire.val(Term/Const(poppedTerm.val.str), 
                             Trace/Branch([
                               Env/Env(env.sym
@@ -675,7 +709,7 @@ def additionEx(a1, a2):
       # Push "true" onto the running stack. This is the only way the program can be entered (backward: exited)
       RMCProg/Push(Term/Const(`true`), `rnin`),
       # Two options, the num in a1 is either 0 or 1 + x.
-      RMCProg/Rep(RMCProg/Or([
+      RMCProg/Rep(RMCProg/Or(
         RMCProg/Comp([
           # If a is zero, pop it
           RMCProg/Pop(Term/Const(`z`), a1), 
@@ -688,7 +722,7 @@ def additionEx(a1, a2):
           RMCProg/Ex(lambda d: RMCProg/Comp([RMCProg/Pop(Term/Fun(`s`, [d]), a1), RMCProg/Push(d, a1)])), 
           RMCProg/Ex(lambda z2: RMCProg/Comp([RMCProg/Pop(z2, a2), RMCProg/Push(Term/Fun(`s`, [z2]), a2)]))
         ])
-      ])),
+      )),
       # The only way to exit the program (backward: enter) is if running is set to false.
       RMCProg/Pop(Term/Const(`fals`), `rnin`)
     ])
@@ -716,23 +750,56 @@ def FirstEnvString(f, envs):
     case List/Cons:
       return f(envs.head)
 
-def main():
-  wire = (lambda $x: lambda z: z, $x)
-  return (wire, wire)
+def main3():
+  (f, r) = (lambda $x: 0, $x)
+  return (f(1), r, r)
 
-def main2():
-  state = n_steps(8, [emptyEnv(exCtx(), additionEx(`a`, `b`))])
+
+# This works correctly
+def mainTest1():
+  state = n_steps(15, [
+    emptyEnv(Map/set_maybe({}, `a`, [Term/Const(`z`), Term/Const(`z`)]), 
+             RMCProg/Ex(lambda x: RMCProg/Or(RMCProg/Comp([RMCProg/Pop(x, `a`), RMCProg/Pop(Term/Const(`w`), `a`)])
+                                            ,RMCProg/Comp([RMCProg/Pop(x, `a`), RMCProg/Pop(x, `a`)]) )))])
+  #return printEnvs(state)
   match state:
     case List/Nil:
       return "Empty"
     case List/Cons:
       env = state.head
-      #return EnvString(env)
-      match env:
-        case Env/Env:
+      return EnvString(env)
+
+# This does not work correctly.
+# Works until second branch. Notice that one of the variable instances becomes an eraser.
+# Something goes wrong when copying the HOAS when the HOAS copies its variable.
+def mainTest2():
+  state = n_steps(10, [
+    emptyEnv(Map/set_maybe({}, `a`, [Term/Const(`z`), Term/Const(`z`)]), 
+            RMCProg/Or( RMCProg/Ex(lambda x: RMCProg/Comp([RMCProg/Pop(x, `a`), RMCProg/Pop(Term/Const(`w`), `a`)]))
+                      , RMCProg/Ex(lambda x: RMCProg/Comp([RMCProg/Pop(x, `a`), RMCProg/Pop(x, `a`)])) ))])
+  #return printEnvs(state)
+  match state:
+    case List/Nil:
+      return "Empty"
+    case List/Cons:
+      env = state.head
+      return EnvString(env)
+
+# This doesn't work, for some reason.
+def main11():
+  state = n_steps(20, [emptyEnv(exCtx(), additionEx(`a`, `b`))])
+  #return printEnvs(state)
+  match state:
+    case List/Nil:
+      return "Empty"
+    case List/Cons:
+      env = state.head
+      return EnvString(env)
+#      match env:
+#        case Env/Env:
           #return WireMapString(env.wireMap)
           #return StackMapString(env.stackMap)
-          return (env.instr)
+#          return (env.instr)
           #return RMCProgArgsString(env.instrStack, ", ")
 
 #  return n_steps(7, [emptyEnv(exCtx(), additionEx(`a`, `b`))])
